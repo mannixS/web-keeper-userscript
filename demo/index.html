@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>定时助手测试页面</title>
+<style>
+  [hidden]{display:none!important}
+  body{font:16px/1.7 system-ui,"Microsoft YaHei",sans-serif;background:#f2f5fb;color:#172b4d;margin:0;padding:40px}main{max-width:840px;margin:auto}h1{margin-bottom:5px}p{color:#526783}section{background:white;border:1px solid #d9e2f1;border-radius:16px;padding:24px;margin:20px 0}.grid{display:flex;flex-wrap:wrap;gap:20px}.metric{flex:1;min-width:150px;border-radius:12px;padding:18px;background:#eef4ff}.metric strong{font-size:32px;display:block;color:#2563eb}button,a.action{display:inline-block;color:white;background:#2563eb;border:0;border-radius:8px;padding:9px 18px;text-decoration:none;cursor:pointer;font:inherit}input,select{font:inherit;border:1px solid #c6d4e8;padding:8px;border-radius:7px}label{display:inline-block;margin:8px 12px 8px 0}code{background:#e9eff8;padding:2px 5px;border-radius:4px}
+</style>
+<main>
+<h1>网页保活与采集 · 测试页面</h1>
+<p>安装脚本后，用右下角「定时助手」点选按钮或录制流程。此页仅保存演示数据。</p>
+<section id="setup">
+  <h2>脚本入口</h2>
+  <p id="install-status">正在检查油猴脚本是否加载…</p>
+  <a class="action" id="http-demo-link" href="http://127.0.0.1:4173/" hidden>打开 HTTP 演示页</a>
+  <a class="action" id="install-script" href="/web-keeper.user.js">安装 / 更新油猴脚本</a>
+  <button id="open-assistant" hidden>打开定时助手</button>
+  <p id="edge-help">Edge 用户：在 edge://extensions 开启开发人员模式，并确保油猴和本脚本已启用；然后刷新此页。</p>
+</section>
+<section id="home">
+  <h2>保活操作</h2>
+  <p>选择「打开活动页面」，设置点击间隔和返回等待，脚本应打开页面后自动返回。</p>
+  <a class="action" id="activity-link" href="/activity">打开活动页面</a>
+  <button id="ping">点击保活（不跳转）</button>
+  <a class="action" id="blank-link" href="/activity" target="_blank">新标签链接</a>
+  <p>活动访问次数：<strong id="visits">0</strong>；保活点击次数：<strong id="pings">0</strong></p>
+</section>
+<section id="activity" hidden><h2>活动页面</h2><p>脚本应等待你配置的时间，再返回执行前的页面。</p><a href="/">返回首页</a></section>
+<section>
+  <h2>数据采集流程</h2>
+  <a class="action" id="report-link" href="/reports">打开数据报表</a>
+  <div id="report" hidden>
+    <p>可录制：填写查询标识 → 选择渠道 → 点击查询 → 添加两个采集值。</p>
+    <label>查询标识 <input id="filter" value="today" autocomplete="off"></label>
+    <label>渠道 <select id="channel"><option value="all">全部</option><option value="app">App</option></select></label>
+    <label><input id="include-test" type="checkbox">包含测试数据</label>
+    <label>密码字段测试 <input id="secret" type="password" autocomplete="new-password"></label>
+    <button id="apply">查询</button>
+    <p id="query-status">等待查询</p>
+    <div class="grid"><div class="metric">激活量<strong id="activation" data-count="1200">1,200 人</strong></div><div class="metric">新增用户<strong id="users">80</strong></div></div>
+  </div>
+</section>
+<section>
+  <h2>自定义下拉菜单测试</h2>
+  <p>模拟 Ant 下拉选项。打开菜单并选择「甘肃」，再采集显示出来的激活量。</p>
+  <div id="province-select" class="ant-select" role="combobox" tabindex="0" aria-controls="province-popup" aria-expanded="false" style="border:1px solid #c6d4e8;border-radius:8px;padding:9px;cursor:pointer;max-width:280px"><span id="province-selected" class="ant-select-selection">请选择省份</span></div>
+  <ul id="province-popup" class="ant-select-dropdown-menu" role="listbox" hidden style="padding:0;list-style:none;border:1px solid #c6d4e8;max-width:280px"></ul>
+  <ul id="old-province-popup" class="ant-select-dropdown-menu" role="listbox" hidden><li class="ant-select-dropdown-menu-item" role="option">甘肃</li></ul>
+  <div id="province-details"></div>
+</section>
+<section>
+  <h2>其他情况</h2><a class="action" id="spa-link" href="#detail">单页页面跳转</a><span id="spa-state"></span>
+  <button id="slow-spa">慢速切换页面</button><span id="slow-value">0</span>
+  <div id="shadow-demo"></div>
+</section>
+</main>
+<script>
+  const isFile=location.protocol==='file:';
+  const scriptLink=document.querySelector('#install-script');
+  if(isFile) scriptLink.href='http://127.0.0.1:4173/web-keeper.user.js';
+  document.querySelector('#http-demo-link').hidden=!isFile;
+  function checkScript(){
+    const loaded=!!document.querySelector('#web-keeper-root');
+    document.querySelector('#install-status').textContent=isFile?'你正在直接打开 HTML 文件，当前脚本只匹配 HTTP / HTTPS 页面。请先启动本地服务，再点击「打开 HTTP 演示页」。':loaded?'脚本已加载。点击下面「打开定时助手」，或使用右下角悬浮按钮。':'尚未检测到脚本。请安装 / 启用油猴脚本，完成 Edge 的执行权限设置后刷新网页。';
+    document.querySelector('#open-assistant').hidden=!loaded;
+    document.querySelector('#edge-help').hidden=loaded;
+  }
+  document.querySelector('#open-assistant').onclick=()=>window.dispatchEvent(new Event('web-keeper:open'));
+  checkScript();setInterval(checkScript,1000);
+  const visits = Number(localStorage.getItem('demo-visits') || 0);
+  if (location.pathname === '/activity') { localStorage.setItem('demo-visits', visits+1); document.querySelector('#home').hidden=true; document.querySelector('#activity').hidden=false; }
+  document.querySelector('#visits').textContent=localStorage.getItem('demo-visits')||'0';
+  document.querySelector('#pings').textContent=localStorage.getItem('demo-pings')||'0';
+  document.querySelector('#ping').onclick=()=>{const n=Number(localStorage.getItem('demo-pings')||0)+1;localStorage.setItem('demo-pings',n);document.querySelector('#pings').textContent=n;};
+  if (location.pathname === '/reports') document.querySelector('#report').hidden=false;
+  document.querySelector('#apply').onclick=()=>{document.querySelector('#query-status').textContent='查询中…';setTimeout(()=>{const app=document.querySelector('#channel').value==='app';const extra=document.querySelector('#include-test').checked?10:0;const count=(app?420:1200)+extra;document.querySelector('#activation').textContent=count.toLocaleString('en-US')+' 人';document.querySelector('#activation').dataset.count=count;document.querySelector('#users').textContent=app?'32':'80';document.querySelector('#query-status').textContent='完成：'+document.querySelector('#filter').value;},700);};
+  document.querySelector('#spa-link').onclick=event=>{event.preventDefault();history.pushState({},'', '#detail');document.querySelector('#spa-state').textContent=' 已打开详情';};
+  window.onpopstate=()=>{document.querySelector('#spa-state').textContent=location.hash?' 已打开详情':'';};
+  document.querySelector('#slow-spa').onclick=()=>{setTimeout(()=>{history.pushState({},'', '/slow');document.querySelector('#slow-value').textContent='999';},1800);};
+  const provinceSelect=document.querySelector('#province-select');
+  const provincePopup=document.querySelector('#province-popup');
+  provinceSelect.onmousedown=()=>{
+    const provinces=window.demoProvinceOrder || ['河北','甘肃','青海'];
+    provincePopup.innerHTML=provinces.map(name=>'<li class="ant-select-dropdown-menu-item'+(name===(window.demoActiveProvince||'河北')?' ant-select-dropdown-menu-item-active':'')+'" role="option" style="padding:8px;cursor:pointer"><span>'+name+'</span></li>').join('');
+    provincePopup.hidden=false;provinceSelect.setAttribute('aria-expanded','true');
+    document.querySelector('#old-province-popup').hidden=!window.demoDuplicateProvince;
+  };
+  provincePopup.onmousedown=event=>event.preventDefault();
+  provincePopup.onpointerover=event=>{const item=event.target.closest('.ant-select-dropdown-menu-item');if(!item)return;provincePopup.querySelectorAll('li').forEach(el=>el.classList.toggle('ant-select-dropdown-menu-item-active',el===item));};
+  provincePopup.onclick=event=>{
+    const item=event.target.closest('.ant-select-dropdown-menu-item');if(!item)return;
+    const name=item.textContent.trim();document.querySelector('#province-selected').textContent=name;provinceSelect.dataset.province=name;
+    const history=JSON.parse(localStorage.getItem('demo-province-selections')||'[]');history.push(name);localStorage.setItem('demo-province-selections',JSON.stringify(history));
+    document.querySelector('#province-details').innerHTML=name==='甘肃'?'<p>甘肃激活量：<strong id="gansu-activation">588</strong></p>':'';
+    provincePopup.hidden=true;provinceSelect.setAttribute('aria-expanded','false');
+  };
+  const shadow=document.querySelector('#shadow-demo').attachShadow({mode:'open'});shadow.innerHTML='<p>开放 Shadow DOM 中的值：<strong id="shadow-value">256</strong></p>';
+</script>
+</html>

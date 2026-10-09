@@ -1,0 +1,22 @@
+{
+  "name": "web-keeper-userscript",
+  "private": true,
+  "version": "1.0.3",
+  "license": "MIT",
+  "description": "网页保活与定时采集油猴脚本",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mannixS/web-keeper-userscript.git"
+  },
+  "homepage": "https://github.com/mannixS/web-keeper-userscript#readme",
+  "bugs": {
+    "url": "https://github.com/mannixS/web-keeper-userscript/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/core.test.cjs",
+    "test:browser": "node tests/browser.test.cjs"
+  }
+}
