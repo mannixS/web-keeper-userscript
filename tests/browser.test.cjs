@@ -197,7 +197,7 @@ async function main() {
       document.body.appendChild(section);
     });
     await diagnostic.locator('#launcher').click();
-    assert.ok((await diagnostic.locator('.brand').textContent()).includes('v1.0.5'));
+    assert.ok((await diagnostic.locator('.brand').textContent()).includes('v1.0.6'));
     await diagnostic.getByRole('button',{name:'＋ 保活任务',exact:true}).click();
     await diagnostic.getByRole('button',{name:'点选点击元素',exact:true}).click();
     await diagnostic.locator('#diagnostic-visible').click();

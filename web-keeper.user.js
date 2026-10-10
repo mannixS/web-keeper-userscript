@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网页保活与定时采集助手
 // @namespace    local.web-keeper
-// @version      1.0.5
+// @version      1.0.6
 // @description  点选元素、定时点击后返回、录制同站操作并采集多个值，支持每日计划、CSV 导出和本地文件自动追加保存。
 // @author       mannixS
 // @license      MIT
@@ -27,7 +27,7 @@
   'use strict';
 
   const Core = (() => {
-    const VERSION = '1.0.5';
+    const VERSION = '1.0.6';
     const MIN_INTERVAL = 5000;
     const MAX_DELAY = 86400000;
     const normalizeLabel = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -63,6 +63,12 @@
       date.setHours(h, m, 0, 0);
       if (date.getTime() <= now) date.setDate(date.getDate() + 1);
       return date.getTime();
+    }
+    function executionWindow(task, gapMs = 0) {
+      const configured = task.steps.reduce((sum, step) => sum + step.delayMs + task.timeoutMs, 0) + task.returnDelayMs + 120000;
+      // 只提供固定、有限的后台调度余量，截止时间仍锚定本轮开始时间。
+      const cadence = Number.isFinite(gapMs) && gapMs >= 5000 ? Math.min(60000, gapMs) : 0;
+      return configured + cadence * (task.steps.length * 2 + 4);
     }
     function extract(raw, pattern) {
       if (!pattern) return String(raw).trim();
@@ -168,7 +174,7 @@
       }
       return task;
     }
-    return { VERSION, MIN_INTERVAL, MAX_DELAY, normalizeLabel, isTransientClass, isDynamicId, optionSelector, optionText, createId, nextRun, extract, csvCell, toCSV, parseCSV, archiveDelta, sameOrigin, sameRoute, validateTask };
+    return { VERSION, MIN_INTERVAL, MAX_DELAY, normalizeLabel, isTransientClass, isDynamicId, optionSelector, optionText, createId, nextRun, executionWindow, extract, csvCell, toCSV, parseCSV, archiveDelta, sameOrigin, sameRoute, validateTask };
   })();
 
   // Node 内置测试可以直接加载算法；在浏览器中继续启动界面。
@@ -212,7 +218,7 @@
   const fileState = { handleId: '', handle: null, job: null, signature: '', lastAttempt: 0 };
   const FILE_LOCK = DB_KEY + ':auto-file';
   const environment = {
-    startedAt: Date.now(), lastBeatAt: Date.now(), maxGapMs: 0, delayCount: 0,
+    startedAt: Date.now(), lastBeatAt: Date.now(), lastGapMs: 0, maxGapMs: 0, delayCount: 0,
     lastDelayAt: 0, lastWarningAt: 0, freezeCount: 0, lastResumeAt: 0,
     wasDiscarded: document.wasDiscarded === true
   };
@@ -272,6 +278,7 @@
     const gap = now - environment.lastBeatAt;
     environment.lastBeatAt = now;
     if (Number.isFinite(gap) && gap >= 0) {
+      environment.lastGapMs = gap;
       environment.maxGapMs = Math.max(environment.maxGapMs, gap);
       if (gap >= 5000) {
         environment.delayCount++; environment.lastDelayAt = now;
@@ -290,10 +297,11 @@
     return `<article class="card"><h3>运行状态观察</h3><p class="help">可观察页面前后台、调度间隔和浏览器提供的冻结记录。不能单独识别锁屏，也不能读取或修改浏览器休眠白名单、节能开关和 Windows 电源设置。</p><dl class="environment-stats">${stats.map(([key,label]) => `<dt>${label}</dt><dd data-environment="${key}">${esc(values[key])}</dd>`).join('')}</dl><p class="help">调度间隔变长只说明执行延迟，无法判断是哪项设置导致。暂停期间脚本无法发出提示，恢复后才能记录。上述观察仅覆盖本次页面加载；刷新或跳转后重新观察。</p><button data-action="reset-environment">重新开始观察</button></article>
       <article class="card"><h3>1. 将本站加入 Edge 活动网站列表</h3><p class="help">此设置无法自动检测或代为修改。请复制设置地址到浏览器地址栏；网页不能直接打开内部设置页。</p><label class="field">Edge 设置地址<input id="guide-edge" readonly value="edge://settings/system"></label><button data-action="copy-guide" data-guide="guide-edge">复制 Edge 设置地址</button><ol class="guide-steps"><li>打开「设置 → 系统和性能 → 性能」。</li><li>找到「始终保持这些网站处于活动状态」（旧版可能叫「从不将这些站点置于睡眠状态」），点击添加。</li><li>添加下方的本站地址，使本站排除标签休眠和节能限制。</li></ol><label class="field">本站地址<input id="guide-site" readonly value="${esc(ORIGIN)}"></label><button data-action="copy-guide" data-guide="guide-site">复制本站地址</button><p class="help"><a class="guide-link" href="https://support.microsoft.com/en-us/edge/learn-about-performance-features-in-microsoft-edge" target="_blank" rel="noopener noreferrer">微软 Edge 设置说明</a> · 其他浏览器请查找对应的「内存节省 / 节能」网站例外。</p><label class="field guide-check"><input type="checkbox" data-environment-check="edge" ${acknowledged.edge ? 'checked' : ''}>我已手动将本站加入活动网站列表</label><div class="muted">${acknowledged.edge ? '用户确认：' + esc(fmt(acknowledged.edge)) + '（非自动验证）' : '尚未由用户确认；脚本无法验证此设置'}</div></article>
       <article class="card"><h3>2. 设置电脑保持运行</h3><ol class="guide-steps"><li>Windows 11：打开「设置 → 系统 → 电源和电池 / 电源 → 屏幕、睡眠和休眠超时」。Windows 10：打开「设置 → 系统 → 电源和睡眠」。</li><li>将运行任务期间使用的供电模式下「使设备进入睡眠状态」设为「从不」；如提供自动休眠选项，也需检查。</li><li>保持浏览器和目标标签页打开，保持网络连接。锁屏后也要确保电脑没有进入睡眠；笔记本合盖可能会进入睡眠。</li></ol><p class="help"><a class="guide-link" href="https://support.microsoft.com/en-us/windows/experience/power-battery/power-settings-in-windows-11" target="_blank" rel="noopener noreferrer">微软 Windows 电源设置说明</a></p><label class="field guide-check"><input type="checkbox" data-environment-check="system" ${acknowledged.system ? 'checked' : ''}>我已手动检查自动睡眠和休眠设置</label><div class="muted">${acknowledged.system ? '用户确认：' + esc(fmt(acknowledged.system)) + '（非自动验证）' : '尚未由用户确认；脚本无法验证此设置'}</div><p class="help">勾选只记录你的确认，不能证明电脑会一直保持运行。更改设置后可取消勾选。</p></article>
-      <article class="card"><h3>3. 做一次后台实测</h3><p class="help">完成设置后，点击上方「重新开始观察」，将浏览器最小化或锁屏至少 10 分钟，再回到本页检查最长调度间隔和延迟记录。观察不会额外点击网页；已启用的任务仍照常运行。测试期间避免刷新或页面跳转，否则观察重新开始。</p><p class="help">一次测试未出现延迟，也不能保证以后准时执行。浏览器和系统仍可能限制后台运行；恢复后的补执行无法挽回已经过期的登录状态。</p></article>`;
+      <article class="card"><h3>3. 白名单已设置，锁屏后仍失败？</h3><p class="help">锁屏时，Chromium 会把被遮挡的浏览器窗口视为后台窗口。反复出现约 60 秒的检查间隔，符合后台计时器每分钟检查一次的限速特征，但不能据此证明页面完全冻结。</p><p class="help">Edge 的强力后台计时器限速有独立策略。可按微软说明，由你或管理员将 <strong>IntensiveWakeUpThrottlingEnabled</strong> 设置为「禁用」（注册表 DWORD 值为 0）。它作用于整个 Edge，并可能增加后台耗电；公司管理的电脑请由管理员处理。</p><label class="field">Edge 策略检查地址<input id="guide-policy" readonly value="edge://policy"></label><button data-action="copy-guide" data-guide="guide-policy">复制策略检查地址</button><ol class="guide-steps"><li>按下方微软文档配置策略，网页脚本不能读取或修改此策略。</li><li>在策略检查页重新加载策略，确认该项为 false，且状态正常。没有该项表示尚未配置，不能当作已关闭。</li><li>保存其他网页工作，完全退出并重新启动 Edge，再回到本站测试；不要只刷新标签页。</li></ol><p class="help"><a class="guide-link" href="https://learn.microsoft.com/zh-cn/deployedge/microsoft-edge-policies/intensivewakeupthrottlingenabled" target="_blank" rel="noopener noreferrer">微软策略设置说明</a> · <a class="guide-link" href="https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/windows_native_window_occlusion_tracking.md" target="_blank" rel="noopener noreferrer">Chromium 锁屏与后台判定说明</a></p><p class="help">这项策略只处理强力计时器限速，不能解除实际的标签冻结、网站自身暂停或电脑休眠。油猴没有强制唤醒冻结页面的接口。脚本会减少内部阶段等待并提供有限的调度余量；配置的等待时间仍保留，实际执行可能晚于计划。</p></article>
+      <article class="card"><h3>4. 做一次后台实测</h3><p class="help">完成设置后，点击上方「重新开始观察」，将浏览器最小化或锁屏至少 10 分钟，再回到本页检查最长调度间隔和延迟记录。观察不会额外点击网页；已启用的任务仍照常运行。测试期间避免刷新或页面跳转，否则观察重新开始。</p><p class="help">一次测试未出现延迟，也不能保证以后准时执行。浏览器和系统仍可能限制后台运行；恢复后的补执行无法挽回已经过期的登录状态。</p></article>`;
   }
   async function copyGuide(button) {
-    const field = ['guide-edge', 'guide-site'].includes(button.dataset.guide) && $('#' + button.dataset.guide);
+    const field = ['guide-edge', 'guide-site', 'guide-policy'].includes(button.dataset.guide) && $('#' + button.dataset.guide);
     if (!field) return;
     try {
       if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') throw new Error('Clipboard unavailable');
@@ -796,8 +804,8 @@
     if (!(await claimOwner(manual))) throw new Error('任务由另一个标签页执行');
     if (session.run || session.recording || picking || (!manual && !db().enabled)) throw new Error('任务启动已取消');
     const now = Date.now();
-    const totalWait = task.steps.reduce((sum, step) => sum + step.delayMs + task.timeoutMs, 0);
-    session.run = { id: uid(), ownerId: tabId, task: clone(task), taskId: task.id, manual, preview, homeUrl: location.href, homeLength: history.length, started: now, expires: now + totalWait + task.returnDelayMs + 120000, phase: 'entry', index: 0, readyAt: now };
+    const schedulerGapMs = environment.lastGapMs <= 90000 ? environment.lastGapMs : 0;
+    session.run = { id: uid(), ownerId: tabId, task: clone(task), taskId: task.id, manual, preview, homeUrl: location.href, homeLength: history.length, started: now, schedulerGapMs, expires: now + Core.executionWindow(task, schedulerGapMs), phase: 'entry', index: 0, readyAt: now };
     persist();
     if (!preview) updateDB(state => { const current = state.tasks.find(t => t.id === task.id); if (current) { current.nextRun = Core.nextRun(current.schedule, now); current.lastMessage = '执行中'; } });
     log('开始' + (preview ? '试运行：' : '执行：') + task.name); refreshSoon();
@@ -821,11 +829,15 @@
     if (run.phase === 'return' || run.phase === 'returning' || run.task.returnMode === 'none') { finishRun(message); return; }
     run.error = message; run.phase = 'return'; run.readyAt = Date.now(); persist();
   }
-  function advance(run) { run.index++; delete run.stepIndex; run.readyAt = Date.now(); persist(); }
+  function advance(run) {
+    run.index++; delete run.stepIndex; run.readyAt = Date.now();
+    if (run.index >= run.task.steps.length) { run.phase = 'return'; run.readyAt += run.task.returnDelayMs; }
+    persist();
+  }
   async function executeStep(run, now) {
     const step = run.task.steps[run.index];
     if (!step) { run.phase = 'return'; run.readyAt = now + run.task.returnDelayMs; persist(); return; }
-    if (run.stepIndex !== run.index) { run.stepIndex = run.index; run.readyAt = now + step.delayMs; run.elementDeadline = run.readyAt + run.task.timeoutMs; persist(); return; }
+    if (run.stepIndex !== run.index) { run.stepIndex = run.index; run.readyAt = now + step.delayMs; run.elementDeadline = run.readyAt + run.task.timeoutMs; persist(); }
     if (now < run.readyAt) return;
     if (step.type === 'wait') { advance(run); return; }
     if (step.pageUrl) {
@@ -872,31 +884,48 @@
     if (!run.returnFallback && now - run.returnStarted > 4000) { run.returnFallback = true; run.returnStarted = now; persist(); location.assign(run.homeUrl); }
     else if (now - run.returnStarted > 30000) finishRun('返回原页面超时');
   }
+  async function progressRun() {
+    const run = session.run;
+    if (!run || pageLeaving) return;
+    if (GM_getValue(OWNER_KEY, '') !== tabId) { finishRun('执行标签已切换'); return; }
+    if (!run.manual && !db().enabled) { finishRun('本站任务已暂停'); return; }
+    const now = Date.now(), gap = environment.lastGapMs;
+    if (gap >= 5000 && gap <= 90000) {
+      const cadence = Math.max(run.schedulerGapMs || 0, Math.min(60000, gap));
+      const expires = Math.max(run.expires, run.started + Core.executionWindow(run.task, cadence));
+      if (expires !== run.expires || cadence !== run.schedulerGapMs) { run.schedulerGapMs = cadence; run.expires = expires; persist(); }
+    }
+    if (now > run.expires) { finishRun('任务执行超时（调度延迟或操作未完成，请查看运行环境）'); return; }
+    // 内部阶段在本次检查中直接推进；页面操作仍每次至多执行一步。
+    if (run.phase === 'entry') {
+      run.phase = 'arrival'; run.arrivalDeadline = now + 30000;
+      run.readyAt = now + (location.href === run.task.entryUrl ? 0 : 500); persist();
+      if (location.href !== run.task.entryUrl) { location.assign(run.task.entryUrl); return; }
+    }
+    if (run.phase === 'arrival') {
+      if (!Core.sameRoute(location.href, run.task.entryUrl, ORIGIN)) {
+        if (now > run.arrivalDeadline) throw new Error('起始页地址不匹配，可能已跳转到登录页');
+        return;
+      }
+      if (now < run.readyAt) return;
+      run.phase = 'steps'; persist();
+    }
+    if (run.phase === 'steps') await executeStep(run, now);
+    else returnHome(run, now);
+  }
   async function tick() {
     if (!tabId || busy || pageLeaving || session.recording || picking) return;
     busy = true;
     try {
       const state = db();
-      const run = session.run;
-      if (run) {
-        if (GM_getValue(OWNER_KEY, '') !== tabId) { finishRun('执行标签已切换'); return; }
-        if (!run.manual && !state.enabled) { finishRun('本站任务已暂停'); return; }
-        const now = Date.now();
-        if (now > run.expires) { finishRun('任务执行超时（页面可能已休眠）'); return; }
-        if (run.phase === 'entry') {
-          run.phase = 'arrival'; run.arrivalDeadline = now + 30000; run.readyAt = now + 500; persist();
-          if (location.href !== run.task.entryUrl) location.assign(run.task.entryUrl);
-        } else if (run.phase === 'arrival') {
-          if (!Core.sameRoute(location.href, run.task.entryUrl, ORIGIN)) { if (now > run.arrivalDeadline) throw new Error('起始页地址不匹配，可能已跳转到登录页'); }
-          else if (now >= run.readyAt) { run.phase = 'steps'; persist(); }
-        } else if (run.phase === 'steps') await executeStep(run, now);
-        else returnHome(run, now);
+      if (session.run) {
+        await progressRun();
       } else if (state.enabled && state.tasks.some(t => t.enabled && t.nextRun <= Date.now())) {
         if (!(await claimOwner())) return;
         const fresh = db();
         if (!fresh.enabled) return;
         const task = fresh.tasks.filter(t => t.enabled && t.nextRun <= Date.now()).sort((a,b) => a.nextRun-b.nextRun)[0];
-        if (task) await beginRun(task);
+        if (task) { await beginRun(task); await progressRun(); }
       }
     } catch (error) { if (session.run) failRun(error.message); else log(error.message, 'error'); }
     finally { busy = false; const status = $('#status'); if (status) status.textContent = statusText(); }
@@ -931,7 +960,7 @@
       case 'view': currentView = button.dataset.view; render(); break;
       case 'copy-guide': await copyGuide(button); break;
       case 'reset-environment':
-        Object.assign(environment, { startedAt: Date.now(), lastBeatAt: Date.now(), maxGapMs: 0, delayCount: 0, lastDelayAt: 0, freezeCount: 0, lastResumeAt: 0 });
+        Object.assign(environment, { startedAt: Date.now(), lastBeatAt: Date.now(), lastGapMs: 0, maxGapMs: 0, delayCount: 0, lastDelayAt: 0, freezeCount: 0, lastResumeAt: 0 });
         render(); notice('已重新开始观察，请在后台运行一段时间后返回查看'); break;
       case 'new-keep': newDraft('keep'); break;
       case 'new-collect': newDraft('collect'); break;

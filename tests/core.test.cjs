@@ -3,6 +3,15 @@ const assert = require('node:assert/strict');
 const core = require('../web-keeper.user.js');
 const origin = 'https://example.test';
 
+test('后台调度预算保留原等待时间，并为限速提供有上限的固定余量', () => {
+  const task={steps:[{delayMs:3000},{delayMs:5000}],timeoutMs:10000,returnDelayMs:2000};
+  const normal=3000+5000+2*10000+2000+120000;
+  assert.equal(core.executionWindow(task,500),normal);
+  assert.equal(core.executionWindow(task,60000),normal+8*60000);
+  assert.equal(core.executionWindow(task,3600000),normal+8*60000);
+  assert.equal(core.executionWindow(task,NaN),normal);
+});
+
 function sample(id, value = '0') { return { id, time: 0, taskName: '每日数据', name: '激活量', value, raw: '数值：' + value, url: origin }; }
 
 test('自动保存 CSV 能恢复含逗号、引号和换行的记录并按 ID 去重', () => {

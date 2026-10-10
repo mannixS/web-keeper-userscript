@@ -32,6 +32,8 @@ Edge 用户：在地址栏输入 `edge://extensions`，开启「开发人员模�
 
 1.0.5 新增「采集历史 → 自动保存到本地文件」，选择并授权一次后，每次采集自动追加到同一个 CSV 文件，支持刷新恢复、记录去重和失败后补写。
 
+1.0.6 修复后台限速时任务内部阶段重复等待导致的过早超时：一次检查内推进已就绪的内部阶段，每次至多执行一个页面操作；为观测到的慢速检查提供固定、有限的执行余量。新增白名单已配置时的 Edge 强力计时器限速策略指引。
+
 ### 最小化或锁屏前的设置检查
 
 打开「定时助手 → 运行环境」，或从油猴菜单选择「运行环境与设置指引」。
@@ -44,6 +46,20 @@ Edge 用户：在地址栏输入 `edge://extensions`，开启「开发人员模�
 两次调度检查间隔达到 5 秒时，界面显示延迟提示；本站任务启用时也会记录警告日志（最多每 5 分钟一条调度延迟警告）。该间隔不能证明电脑休眠或某项设置有误，也可能来自页面繁忙或系统时钟变化。页面暂停期间无法发出提示，只能在恢复后记录。未出现延迟、没有冻结事件或已勾选确认，都不能保证未来准时运行。
 
 Edge 指引：设置 → 系统和性能 → 性能 →「始终保持这些网站处于活动状态」，添加本站地址。Windows 指引：设置 → 系统 → 电源和电池 / 电源，检查运行任务时使用的供电模式下的自动睡眠与休眠设置，并保持浏览器、标签页及网络连接。详细说明见 [微软 Edge 性能设置](https://support.microsoft.com/en-us/edge/learn-about-performance-features-in-microsoft-edge) 与 [Windows 电源设置](https://support.microsoft.com/en-us/windows/experience/power-battery/power-settings-in-windows-11)。
+
+### 已加入白名单，锁屏后仍提示 60 秒间隔
+
+这不能仅凭日志认定为标签休眠。Chromium 在 Windows 锁屏时将窗口判为被遮挡，会把窗口里的前台标签按后台标签处理，可能停止渲染并限制 JavaScript。参见 [Chromium 窗口遮挡说明](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/windows_native_window_occlusion_tracking.md)。
+
+Edge 另有 `IntensiveWakeUpThrottlingEnabled` 策略，控制页面在后台超过 5 分钟后的强力计时器限速，启用时每分钟最多执行一次。反复出现约 60 秒的检查间隔符合该行为，但也可能有其他原因。白名单和关闭节能模式并不能据此证明该策略已关闭。参见 [微软策略文档](https://learn.microsoft.com/zh-cn/deployedge/microsoft-edge-policies/intensivewakeupthrottlingenabled)。
+
+可按微软文档由你或管理员将该策略设置为**禁用**：安装 Edge 管理模板的环境中，在「管理模板 → Microsoft Edge → 控制 IntensiveWakeUpThrottling 功能」选择「已禁用」。对应注册表策略路径为 `SOFTWARE\Policies\Microsoft\Edge`，值名 `IntensiveWakeUpThrottlingEnabled`，类型 `REG_DWORD`，禁用值为 `0`。这是整个 Edge 的策略，可能增加后台耗电；公司管理的电脑应由管理员处理。
+
+配置后在地址栏打开 `edge://policy`，重新加载策略，确认该项为 `false` 且状态正常。没有该项表示未配置，由浏览器内部逻辑控制，不能当作已禁用。保存其他网页工作，完全退出并重新启动 Edge，再进入目标网站重新测试；只刷新网页不足以保证所有进程使用新策略。脚本的「运行环境」提供说明和复制策略检查地址，但无法读取或修改浏览器策略。
+
+1.0.6 的调度兼容会减少无须等待的内部阶段开销，并按本轮观察到的检查间隔增加有限的执行余量；配置的步骤等待、返回等待和元素超时仍保留，任务总截止时间锚定本轮开始，长时间暂停后仍会终止过期任务。这能减少限速时脚本自身的过早失败，实际操作仍可能晚于计划。
+
+**油猴不能强制唤醒冻结或被丢弃的标签页，也不能唤醒已休眠的电脑。** 页面冻结时计时器和其他回调暂停；屏幕 Wake Lock 仅适用于可见、活动页面，转入后台可被释放，不能作为锁屏执行保证。见 [页面生命周期说明](https://developer.chrome.com/docs/web-platform/page-lifecycle-api) 与 [Screen Wake Lock 说明](https://developer.mozilla.org/en-US/docs/Web/API/Screen_Wake_Lock_API)。网站自身也可能在后台停止刷新，或要求可信用户操作；调整浏览器限速不能保证网站一定续期。
 
 ### 某一步仍提示元素没找到
 
@@ -174,11 +190,14 @@ npm install --no-save playwright
 npx playwright install chromium --only-shell
 node tests/browser.test.cjs
 node tests/auto-save.browser.test.cjs
+node tests/background.browser.test.cjs
 ```
 
 也可以通过环境变量 `PLAYWRIGHT_MODULE` 指定已有 Playwright 模块的绝对路径，`PLAYWRIGHT_BROWSERS_PATH` 指定浏览器缓存。测试截图和 CSV 保存到 `test-results/`。
 
 自动保存测试使用 Chromium 的真实文件句柄、文件写入流、IndexedDB 和 Web Locks，文件选择器替换为返回浏览器私有文件系统（OPFS）的测试句柄；权限失效和占用通过失败注入验证。覆盖采集后写入、整页跳转前保存、刷新恢复、重试补写、多标签去重、不相关/损坏文件保护，以及不支持该 API 时的手动导出。系统文件选择框及实际油猴权限仍需在安装后的浏览器中确认。
+
+后台测试使用真实 DOM 点击，模拟每分钟一次的助手检查和固定测试时钟，验证多步骤执行、配置等待、定位失败及长时间暂停后终止任务。它不验证实际 Windows 锁屏、Edge 策略生效或目标网站能否保活，安装更新后仍需做后台实测。
 
 油猴 API 参考：[Tampermonkey 官方文档](https://www.tampermonkey.net/documentation.php)。
 
