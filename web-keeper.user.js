@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         网页保活与定时采集助手
 // @namespace    local.web-keeper
-// @version      1.0.4
-// @description  点选元素、定时点击后返回、录制同站操作并采集多个值，支持每日计划和 CSV 导出。
+// @version      1.0.5
+// @description  点选元素、定时点击后返回、录制同站操作并采集多个值，支持每日计划、CSV 导出和本地文件自动追加保存。
 // @author       mannixS
 // @license      MIT
 // @homepageURL  https://github.com/mannixS/web-keeper-userscript
@@ -27,7 +27,7 @@
   'use strict';
 
   const Core = (() => {
-    const VERSION = '1.0.4';
+    const VERSION = '1.0.5';
     const MIN_INTERVAL = 5000;
     const MAX_DELAY = 86400000;
     const normalizeLabel = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -70,15 +70,56 @@
       if (!match) throw new Error('提取规则没有匹配到值');
       return match[1] === undefined ? match[0] : match[1];
     }
-    function csvCell(value) {
+    function csvValue(value) {
       let str = String(value == null ? '' : value);
       if (/^[\s]*[=+\-@\t\r]/.test(str)) str = "'" + str;
-      return '"' + str.replace(/"/g, '""') + '"';
+      return str;
     }
+    function csvCell(value) { return '"' + csvValue(value).replace(/"/g, '""') + '"'; }
     function toCSV(samples) {
       const rows = [['采集时间', '任务', '值名称', '值', '原始内容', '页面地址']];
       for (const sample of samples) rows.push([new Date(sample.time).toISOString(), sample.taskName, sample.name, sample.value, sample.raw, sample.url]);
       return '\uFEFF' + rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+    }
+    function parseCSV(content) {
+      const text = String(content).replace(/^\uFEFF/, '');
+      const rows = []; let row = [], field = '', quoted = false, closed = false;
+      const cell = () => { row.push(field); field = ''; closed = false; };
+      const endRow = () => { cell(); if (row.length > 1 || row[0] !== '') rows.push(row); row = []; };
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (quoted) {
+          if (char !== '"') field += char;
+          else if (text[i + 1] === '"') { field += '"'; i++; }
+          else { quoted = false; closed = true; }
+        } else if (char === ',') cell();
+        else if (char === '\r' || char === '\n') { endRow(); if (char === '\r' && text[i + 1] === '\n') i++; }
+        else if (char === '"' && !field && !closed) quoted = true;
+        else { if (closed || char === '"') throw new Error('CSV 格式无效，请选择空文件或本功能创建的文件'); field += char; }
+      }
+      if (quoted) throw new Error('CSV 末尾记录不完整，未修改原文件');
+      if (field || row.length || closed) endRow();
+      return rows;
+    }
+    function archiveDelta(content, samples) {
+      const header = ['记录ID', '采集时间', '任务', '值名称', '值', '原始内容', '页面地址'];
+      const rows = parseCSV(content);
+      if (content && (!rows.length || rows[0].length !== header.length || rows[0].some((value, index) => value !== header[index]))) throw new Error('此文件不是自动保存格式，请选择空文件或本功能已创建的 CSV');
+      const ids = new Set();
+      for (const row of rows.slice(1)) {
+        if (row.length !== header.length || !row[0]) throw new Error('CSV 记录格式不完整，未修改原文件');
+        ids.add(row[0]);
+      }
+      const pending = [];
+      for (const sample of samples) {
+        if (typeof sample.id !== 'string' || !sample.id) throw new Error('采集记录缺少唯一 ID');
+        const id = csvValue(sample.id);
+        if (ids.has(id)) continue;
+        ids.add(id); pending.push([sample.id, new Date(sample.time).toISOString(), sample.taskName, sample.name, sample.value, sample.raw, sample.url]);
+      }
+      let append = !content ? '\uFEFF' + header.map(csvCell).join(',') + '\r\n' : pending.length && !/[\r\n]$/.test(content) ? '\r\n' : '';
+      if (pending.length) append += pending.map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+      return { append, count: pending.length, totalRows: Math.max(0, rows.length - 1) + pending.length };
     }
     function sameOrigin(url, origin) {
       try { const parsed = new URL(url, origin); return /^https?:$/.test(parsed.protocol) && parsed.origin === origin; }
@@ -127,7 +168,7 @@
       }
       return task;
     }
-    return { VERSION, MIN_INTERVAL, MAX_DELAY, normalizeLabel, isTransientClass, isDynamicId, optionSelector, optionText, createId, nextRun, extract, csvCell, toCSV, sameOrigin, sameRoute, validateTask };
+    return { VERSION, MIN_INTERVAL, MAX_DELAY, normalizeLabel, isTransientClass, isDynamicId, optionSelector, optionText, createId, nextRun, extract, csvCell, toCSV, parseCSV, archiveDelta, sameOrigin, sameRoute, validateTask };
   })();
 
   // Node 内置测试可以直接加载算法；在浏览器中继续启动界面。
@@ -168,6 +209,8 @@
   let noticeTimer;
   let renderPending = false;
   const inspectionResults = new Map();
+  const fileState = { handleId: '', handle: null, job: null, signature: '', lastAttempt: 0 };
+  const FILE_LOCK = DB_KEY + ':auto-file';
   const environment = {
     startedAt: Date.now(), lastBeatAt: Date.now(), maxGapMs: 0, delayCount: 0,
     lastDelayAt: 0, lastWarningAt: 0, freezeCount: 0, lastResumeAt: 0,
@@ -259,6 +302,125 @@
       field.focus(); field.select(); notice('自动复制不可用，已选中地址，请按 Ctrl+C 复制');
     }
   }
+  function fileSupportReason() {
+    if (!window.isSecureContext) return '自动写入文件需要 HTTPS 页面（本机 localhost 演示也可使用）。';
+    if (typeof window.showSaveFilePicker !== 'function' || typeof navigator.locks?.request !== 'function') return '当前浏览器未提供本地文件自动写入能力，请使用新版桌面 Edge 或 Chrome。';
+    return '';
+  }
+  function fileHandleDB(id, handle) {
+    return new Promise((resolve, reject) => {
+      let connection, transaction, result, finished = false;
+      const finish = (error) => {
+        if (finished) return; finished = true; clearTimeout(timer);
+        if (connection) connection.close();
+        if (error) reject(new Error('网页存储不可用，无法记住或恢复选定文件；请允许本站存储后重新选择文件')); else resolve(result);
+      };
+      const timer = setTimeout(() => { if (transaction) transaction.abort(); finish(true); }, 8000);
+      let request;
+      try { request = indexedDB.open('web-keeper-local-files', 1); } catch { finish(true); return; }
+      request.onupgradeneeded = () => { request.result.createObjectStore('handles'); };
+      request.onerror = request.onblocked = () => finish(true);
+      request.onsuccess = () => {
+        connection = request.result;
+        if (finished) { connection.close(); return; }
+        try {
+          transaction = connection.transaction('handles', handle ? 'readwrite' : 'readonly');
+          const store = transaction.objectStore('handles');
+          const operation = handle ? store.put(handle, id) : store.get(id);
+          operation.onsuccess = () => { result = operation.result; };
+          transaction.oncomplete = () => finish(false);
+          transaction.onerror = transaction.onabort = () => finish(true);
+        } catch { finish(true); }
+      };
+    });
+  }
+  async function savedFileHandle(id) {
+    if (fileState.handleId === id && fileState.handle) return fileState.handle;
+    const handle = await fileHandleDB(id);
+    if (!handle) throw new Error('保存位置未能恢复，请重新选择 CSV 文件');
+    fileState.handleId = id; fileState.handle = handle;
+    return handle;
+  }
+  function fileSignature(state) { return [state.fileSave?.id, state.samples.length, state.samples[0]?.id, state.samples.at(-1)?.id].join('|'); }
+  function fileError(error) {
+    if (error.name === 'NotAllowedError') return '文件写入权限未授予或已失效，请点击「重新授权并重试」';
+    if (error.name === 'NotFoundError') return '文件已被移动或删除，请重新选择 CSV 文件';
+    if (error.name === 'NoModificationAllowedError') return '文件可能被其他程序占用，请关闭占用后重试';
+    if (error.name === 'SecurityError') return '浏览器限制文件访问，请使用 HTTPS 页面并重新授权';
+    return error.message || '本地文件保存失败，请重试';
+  }
+  async function syncAutoFile(force = false) {
+    if (fileState.job) { await fileState.job; return syncAutoFile(force); }
+    const state = db(), config = state.fileSave;
+    if (!config?.enabled || fileSupportReason()) return;
+    if (!force && (fileState.signature === fileSignature(state) || (config.lastError && Date.now() - fileState.lastAttempt < 30000))) return;
+    fileState.lastAttempt = Date.now();
+    fileState.job = navigator.locks.request(FILE_LOCK, async () => {
+      if (db().fileSave?.id !== config.id || !db().fileSave.enabled) return;
+      const handle = await savedFileHandle(config.id);
+      if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') throw new DOMException('Permission required', 'NotAllowedError');
+      const snapshot = db();
+      let writable;
+      try {
+        // 原文件在 close() 前保持不变；失败时 abort()，避免留下半条记录。
+        writable = await handle.createWritable({ keepExistingData: true, mode: 'exclusive' });
+        const file = await handle.getFile();
+        const text = await file.text();
+        if (!text && file.size) throw new Error('文件只有编码标记，请选择新的空 CSV 文件');
+        const delta = Core.archiveDelta(text, snapshot.samples);
+        if (delta.append) {
+          await writable.seek(file.size); await writable.write(delta.append);
+          if (db().fileSave?.id !== config.id || !db().fileSave.enabled) { await writable.abort(); return; }
+          await writable.close();
+        } else await writable.abort();
+        fileState.signature = fileSignature(snapshot);
+        updateDB(current => {
+          if (current.fileSave?.id !== config.id) return;
+          current.fileSave.lastError = ''; current.fileSave.lastCheckedAt = Date.now();
+          current.fileSave.totalRows = delta.totalRows;
+          if (delta.append) current.fileSave.lastSavedAt = Date.now();
+        });
+      } catch (error) { if (writable) { try { await writable.abort(); } catch {} } throw error; }
+    }).catch(error => {
+      const message = fileError(error);
+      const configNow = db().fileSave;
+      if (configNow?.id === config.id && configNow.enabled && configNow.lastError !== message) {
+        updateDB(current => { if (current.fileSave?.id === config.id) current.fileSave.lastError = message; });
+        log('自动保存失败：' + message + '。采集记录仍保留在「采集历史」。', 'warning');
+      }
+    }).finally(() => { fileState.job = null; refreshSoon(); });
+    refreshSoon();
+    return fileState.job;
+  }
+  async function chooseAutoFile() {
+    const reason = fileSupportReason(); if (reason) throw new Error(reason);
+    let handle;
+    try {
+      // 文件选择必须在点击回调中先调用，不能先等待存储或其他异步操作。
+      handle = await window.showSaveFilePicker({ id: 'web-keeper-csv', suggestedName: '采集记录-' + location.hostname + '.csv', types: [{ description: 'CSV 采集记录', accept: { 'text/csv': ['.csv'] } }] });
+    } catch (error) { if (error.name === 'AbortError') { notice('已取消文件选择'); return; } throw error; }
+    const id = uid();
+    await navigator.locks.request(FILE_LOCK, async () => {
+      Core.archiveDelta(await (await handle.getFile()).text(), []);
+      await fileHandleDB(id, handle);
+      fileState.handleId = id; fileState.handle = handle; fileState.signature = '';
+      updateDB(current => { current.fileSave = { id, name: handle.name, enabled: true, lastError: '' }; });
+    });
+    await syncAutoFile(true); render();
+  }
+  async function authorizeAutoFile() {
+    const config = db().fileSave;
+    if (!config) throw new Error('请先选择 CSV 文件');
+    const handle = await savedFileHandle(config.id);
+    if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('未授予文件写入权限，采集历史仍会保留');
+    updateDB(current => { if (current.fileSave?.id === config.id) { current.fileSave.enabled = true; current.fileSave.lastError = ''; } });
+    await syncAutoFile(true); render();
+  }
+  function autoFileHTML(state) {
+    const config = state.fileSave, reason = fileSupportReason();
+    const status = !config ? '尚未选择文件' : !config.enabled ? '已停止自动保存' : reason ? '当前页面无法自动写入文件' : config.lastError ? '等待处理：' + config.lastError : fileState.job ? '正在同步本地文件…' : config.lastCheckedAt ? '自动保存已启用' : '正在恢复保存位置…';
+    return `<article class="card"><h3>自动保存到本地文件</h3><div class="${config?.lastError ? 'warning' : 'muted'}" data-auto-file-status>${esc(status)}</div>${config ? `<div class="help">文件：${esc(config.name)} · 已存 ${Number(config.totalRows) || 0} 条<br>上次写入：${esc(fmt(config.lastSavedAt))}</div>` : ''}<p class="help">首次选择一个专用 CSV 文件并授权，之后每次采集自动追加。首次连接也会补写当前采集历史；相同记录 ID 不会重复写入，已有记录保留。</p>${reason ? `<p class="help warning">${esc(reason)}</p>` : ''}<div class="row wrap"><button data-action="choose-auto-file" ${reason ? 'disabled' : ''}>${config ? '更换保存文件' : '选择 CSV 文件并启用'}</button>${config ? `<button data-action="authorize-auto-file" ${reason ? 'disabled' : ''}>${config.enabled ? '重新授权并重试' : '重新授权并启用'}</button>${config.enabled ? '<button data-action="pause-auto-file">停止自动保存</button><button data-action="sync-auto-file">立即同步文件</button>' : ''}` : ''}</div><p class="help">刷新和同站跳转后会恢复保存位置；浏览器重启后可能需要再次授权。写入失败时保留采集历史，恢复后补写仍在历史中的记录。建议不同网站使用不同文件，编辑 CSV 前先停止自动保存。</p></article>`;
+  }
   function renderBar() {
     const bar = $('#bar');
     bar.hidden = !session.recording && !picking;
@@ -274,6 +436,11 @@
     const state = db();
     panel.innerHTML = `<header><div class="row between"><span class="brand">网页定时助手 <small class="muted">v${Core.VERSION}</small></span><button data-action="close" aria-label="收起">收起</button></div><div class="muted">${esc(ORIGIN)}</div><div class="status" id="status">${esc(statusText())}</div><nav class="tabs">${[['tasks','任务'],['data','采集历史'],['logs','日志'],['environment','运行环境']].map(([id, label]) => `<button data-action="view" data-view="${id}" class="${currentView === id ? 'active' : ''}">${label}</button>`).join('')}</nav><div id="environment-warning" class="environment-warning" hidden><div id="environment-warning-text"></div><button data-action="view" data-view="environment">查看设置指引</button></div></header><main>${currentView === 'editor' ? editorHTML() : currentView === 'data' ? dataHTML(state) : currentView === 'logs' ? logsHTML(state) : currentView === 'environment' ? environmentHTML(state) : tasksHTML(state)}</main><footer>仅在打开的网页中运行 · 计划使用电脑本地时间 · 采集历史最多保留 ${MAX_SAMPLES} 条</footer>`;
     updateEnvironmentUI();
+    if (state.fileSave?.enabled && (state.fileSave.lastError || fileSupportReason())) {
+      const warning = document.createElement('div'); warning.className = 'environment-warning';
+      warning.innerHTML = `<div>自动保存需要处理：${esc(state.fileSave.lastError || fileSupportReason())}。采集历史仍会保留。</div><button data-action="view" data-view="data">查看自动保存设置</button>`;
+      $('header').appendChild(warning);
+    }
   }
   function openAssistant() {
     if (!host.isConnected) document.documentElement.appendChild(host);
@@ -286,7 +453,7 @@
   }
   function dataHTML(state) {
     const list = state.samples.slice(-100).reverse();
-    return `<div class="row between"><span class="muted">共 ${state.samples.length} 条，显示最近 100 条</span><button data-action="export-csv">导出全部 CSV</button></div>${list.length ? '<table><thead><tr><th>采集值 / 任务</th><th>值</th><th>时间</th></tr></thead><tbody>' + list.map(s => `<tr><td>${esc(s.name)}<div class="muted">${esc(s.taskName)}</div></td><td class="value">${esc(s.value)}<details><summary class="muted">原始内容</summary>${esc(s.raw)}</details></td><td>${esc(fmt(s.time))}</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">采集结果会显示在这里</div>'}`;
+    return `${autoFileHTML(state)}<div class="row between"><span class="muted">共 ${state.samples.length} 条，显示最近 100 条</span><button data-action="export-csv">导出全部 CSV</button></div>${list.length ? '<table><thead><tr><th>采集值 / 任务</th><th>值</th><th>时间</th></tr></thead><tbody>' + list.map(s => `<tr><td>${esc(s.name)}<div class="muted">${esc(s.taskName)}</div></td><td class="value">${esc(s.value)}<details><summary class="muted">原始内容</summary>${esc(s.raw)}</details></td><td>${esc(fmt(s.time))}</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">采集结果会显示在这里</div>'}`;
   }
   function logsHTML(state) { return `<div class="muted">最近 200 条运行日志</div>${state.logs.length ? state.logs.map(l => `<div class="log ${l.level === 'error' ? 'error' : l.level === 'warning' ? 'warning' : ''}"><div class="muted">${esc(fmt(l.time))}</div>${esc(l.message)}</div>`).join('') : '<div class="empty">暂无日志</div>'}`; }
   function selected(value, option) { return value === option ? 'selected' : ''; }
@@ -655,7 +822,7 @@
     run.error = message; run.phase = 'return'; run.readyAt = Date.now(); persist();
   }
   function advance(run) { run.index++; delete run.stepIndex; run.readyAt = Date.now(); persist(); }
-  function executeStep(run, now) {
+  async function executeStep(run, now) {
     const step = run.task.steps[run.index];
     if (!step) { run.phase = 'return'; run.readyAt = now + run.task.returnDelayMs; persist(); return; }
     if (run.stepIndex !== run.index) { run.stepIndex = run.index; run.readyAt = now + step.delayMs; run.elementDeadline = run.readyAt + run.task.timeoutMs; persist(); return; }
@@ -681,6 +848,8 @@
       const { raw, value } = readElement(element, step);
       const sample = { id: run.id + ':' + run.index, taskId: run.taskId, taskName: run.task.name, metricId: step.id, name: step.name, time: now, value, raw, url: location.href };
       updateDB(state => { if (!state.samples.some(s => s.id === sample.id)) state.samples.push(sample); state.samples = state.samples.slice(-MAX_SAMPLES); });
+      await syncAutoFile();
+      if (session.run?.id !== run.id) return;
       advance(run); refreshSoon();
     } else {
       // 点击可能马上卸载页面，先持久化下一步，防止跳转后再次点击。
@@ -720,7 +889,7 @@
         } else if (run.phase === 'arrival') {
           if (!Core.sameRoute(location.href, run.task.entryUrl, ORIGIN)) { if (now > run.arrivalDeadline) throw new Error('起始页地址不匹配，可能已跳转到登录页'); }
           else if (now >= run.readyAt) { run.phase = 'steps'; persist(); }
-        } else if (run.phase === 'steps') executeStep(run, now);
+        } else if (run.phase === 'steps') await executeStep(run, now);
         else returnHome(run, now);
       } else if (state.enabled && state.tasks.some(t => t.enabled && t.nextRun <= Date.now())) {
         if (!(await claimOwner())) return;
@@ -815,6 +984,10 @@
       case 'step-up': if (index > 0) { [session.draft.steps[index-1], session.draft.steps[index]] = [session.draft.steps[index], session.draft.steps[index-1]]; persist(); render(); } break;
       case 'step-down': if (index < session.draft.steps.length-1) { [session.draft.steps[index+1], session.draft.steps[index]] = [session.draft.steps[index], session.draft.steps[index+1]]; persist(); render(); } break;
       case 'export-csv': download('采集历史-' + new Date().toISOString().slice(0,10) + '.csv', Core.toCSV(db().samples), 'text/csv;charset=utf-8'); break;
+      case 'choose-auto-file': await chooseAutoFile(); break;
+      case 'authorize-auto-file': await authorizeAutoFile(); break;
+      case 'pause-auto-file': updateDB(state => { if (state.fileSave) state.fileSave.enabled = false; }); render(); break;
+      case 'sync-auto-file': await syncAutoFile(true); render(); break;
       case 'export-config': download('定时助手配置.json', JSON.stringify({ version: 1, origin: ORIGIN, tasks: db().tasks }, null, 2), 'application/json;charset=utf-8'); break;
       case 'import-config': importConfig(); break;
     }
@@ -889,6 +1062,6 @@
     if (session.draft) currentView = 'editor';
     try { persist(); } catch (error) { notice(error.message); }
     if (environment.wasDiscarded) log('运行环境：浏览器报告本页此前被丢弃，现已重新加载。请检查后台运行设置。', 'warning');
-    render(); setInterval(() => { observeEnvironment(); tick(); }, 500); tick();
+    render(); setInterval(() => { observeEnvironment(); tick(); if (!fileState.job) syncAutoFile(); }, 500); tick(); syncAutoFile();
   });
 })();

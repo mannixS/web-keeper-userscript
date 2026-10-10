@@ -2,6 +2,47 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const core = require('../web-keeper.user.js');
 const origin = 'https://example.test';
+
+function sample(id, value = '0') { return { id, time: 0, taskName: '每日数据', name: '激活量', value, raw: '数值：' + value, url: origin }; }
+
+test('自动保存 CSV 能恢复含逗号、引号和换行的记录并按 ID 去重', () => {
+  const record = sample('run-1:0', '1,"2"\r\n3');
+  const first = core.archiveDelta('', [record, record]);
+  assert.equal(first.count, 1);
+  assert.ok(first.append.startsWith('\uFEFF'));
+  const rows = core.parseCSV(first.append);
+  assert.equal(rows[1][4], record.value);
+  assert.equal(rows[1][5], record.raw);
+  assert.equal(core.archiveDelta(first.append, [record]).append, '');
+  const next = core.archiveDelta(first.append, [record, sample('run-1:1')]);
+  assert.equal(next.count, 1); assert.equal(next.totalRows, 2);
+  assert.equal(core.parseCSV(first.append + next.append).length, 3);
+});
+
+test('自动保存拒绝不相关文件、截断的 CSV 和缺列记录', () => {
+  assert.throws(() => core.archiveDelta('已有重要文件内容', [sample('run-1:0')]), /不是自动保存格式/);
+  assert.throws(() => core.archiveDelta(core.toCSV([sample('run-1:0')]), []), /不是自动保存格式/);
+  const header = core.archiveDelta('', []).append;
+  assert.throws(() => core.archiveDelta(header + '"incomplete', []), /不完整/);
+  assert.throws(() => core.archiveDelta(header + '"id","missing columns"', []), /不完整/);
+  assert.throws(() => core.archiveDelta('', [{ ...sample('id'), id: '' }]), /唯一 ID/);
+});
+
+test('自动保存为没有末尾换行的文件补充分隔，并保留旧记录', () => {
+  const original = core.archiveDelta('', [sample('old')]).append.replace(/\r\n$/, '');
+  const delta = core.archiveDelta(original, [sample('new')]);
+  assert.ok(delta.append.startsWith('\r\n'));
+  assert.deepEqual(core.parseCSV(original + delta.append).slice(1).map(row => row[0]), ['old', 'new']);
+});
+
+test('自动保存保留超过浏览器历史上限的旧记录并继续保护表格公式', () => {
+  const old = Array.from({length:5001}, (_,index) => sample('old-' + index));
+  const original = core.archiveDelta('', old).append;
+  const recent = [...old.slice(-4999), sample('new', '=HYPERLINK("evil")')];
+  const delta = core.archiveDelta(original, recent);
+  assert.equal(delta.count, 1); assert.equal(delta.totalRows, 5002);
+  assert.ok(core.parseCSV(original + delta.append).at(-1)[4].startsWith("'="));
+});
 test('普通 HTTP 页面没有 randomUUID 时仍可生成任务和标签 ID', () => {
   const cryptoApi = { getRandomValues: values => { values.fill(42); return values; } };
   assert.match(core.createId(cryptoApi), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

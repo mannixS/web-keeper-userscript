@@ -1,7 +1,7 @@
 {
   "name": "web-keeper-userscript",
   "private": true,
-  "version": "1.0.4",
+  "version": "1.0.5",
   "license": "MIT",
   "description": "网页保活与定时采集油猴脚本",
   "repository": {
@@ -17,6 +17,7 @@
   },
   "scripts": {
     "test": "node --test tests/core.test.cjs",
-    "test:browser": "node tests/browser.test.cjs"
+    "test:browser": "node tests/browser.test.cjs",
+    "test:auto-save": "node tests/auto-save.browser.test.cjs"
   }
 }
