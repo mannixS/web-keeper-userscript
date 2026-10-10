@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网页保活与定时采集助手
 // @namespace    local.web-keeper
-// @version      1.0.3
+// @version      1.0.4
 // @description  点选元素、定时点击后返回、录制同站操作并采集多个值，支持每日计划和 CSV 导出。
 // @author       mannixS
 // @license      MIT
@@ -27,7 +27,7 @@
   'use strict';
 
   const Core = (() => {
-    const VERSION = '1.0.3';
+    const VERSION = '1.0.4';
     const MIN_INTERVAL = 5000;
     const MAX_DELAY = 86400000;
     const normalizeLabel = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -168,6 +168,11 @@
   let noticeTimer;
   let renderPending = false;
   const inspectionResults = new Map();
+  const environment = {
+    startedAt: Date.now(), lastBeatAt: Date.now(), maxGapMs: 0, delayCount: 0,
+    lastDelayAt: 0, lastWarningAt: 0, freezeCount: 0, lastResumeAt: 0,
+    wasDiscarded: document.wasDiscarded === true
+  };
   function clearInspection(index) {
     const step = session.draft && session.draft.steps[index];
     if (!step) return;
@@ -186,6 +191,7 @@
     .primary{background:#2563eb;color:white;border-color:#2563eb}.primary:hover{background:#1d4ed8}.danger{color:#c53030}input,select,textarea{border:1px solid #d6deeb;border-radius:7px;padding:7px;background:white;color:#182238;min-width:0;width:100%}input[type=checkbox]{width:auto}input:focus,select:focus,textarea:focus{outline:2px solid #bfdbfe;border-color:#2563eb}textarea{resize:vertical}
     #panel{width:470px;max-width:calc(100vw - 36px);max-height:85vh;overflow:auto;background:#f8faff;border:1px solid #dce4f1;box-shadow:0 12px 44px #1c355533;border-radius:14px}header{padding:15px 16px;background:#fff;border-bottom:1px solid #e0e7f1;position:sticky;top:0;z-index:1;border-radius:14px 14px 0 0}.brand{font-weight:750;font-size:17px}.muted{font-size:12px;color:#66758a}.row{display:flex;gap:8px;align-items:center}.between{justify-content:space-between}.wrap{flex-wrap:wrap}.grow{flex:1}.tabs{display:flex;gap:5px;margin-top:12px}.tabs button{flex:1}.tabs .active{color:#2563eb;background:#eff5ff;border-color:#b9cdfb}main{padding:14px}.card,.step{background:#fff;border:1px solid #dde5f0;border-radius:10px;padding:12px;margin-bottom:10px}.card h3{font-size:14px;margin:0 0 6px;overflow-wrap:anywhere}.card .actions{margin-top:9px}.badge{font-size:11px;padding:2px 6px;border-radius:5px;background:#eaf0fb;color:#49638c}.field{display:block;margin:0 0 11px;font-size:12px;font-weight:600}.field input,.field select,.field textarea{display:block;margin-top:4px;font-weight:400}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.grid>.field{margin-bottom:0}.section{font-weight:700;margin:14px 0 9px}.help{font-size:12px;color:#66758a;margin:7px 0;overflow-wrap:anywhere}.empty{text-align:center;color:#66758a;padding:28px 14px}.step-head{display:flex;gap:6px;align-items:center;margin-bottom:8px}.step-head strong{flex:1;font-size:13px}.step-head button{padding:2px 6px;font-size:12px}.selector{font-family:monospace;font-size:11px}.step .field{margin-bottom:8px}.step:last-child{margin-bottom:0}#launcher{box-shadow:0 5px 18px #20334d33;background:#2563eb;color:#fff;border-color:#2563eb;padding:10px 14px;border-radius:24px}#bar{margin-bottom:8px;background:#122546;color:#fff;padding:10px;border-radius:10px;max-width:470px}#bar button{font-size:12px;padding:4px 7px}#notice{position:fixed;right:18px;bottom:80px;background:#182b49;color:#fff;padding:11px 15px;border-radius:10px;max-width:420px;pointer-events:none;box-shadow:0 6px 24px #0002}#outline{position:fixed;pointer-events:none;outline:2px solid #2563eb;background:#2563eb19;z-index:2147483646;border-radius:3px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px;border-bottom:1px solid #e5ebf4;text-align:left;vertical-align:top;overflow-wrap:anywhere}td.value{max-width:150px;white-space:pre-wrap}details{margin-top:5px}.log{font-size:12px;padding:8px 0;border-bottom:1px solid #e3eaf5;overflow-wrap:anywhere}.error{color:#b42323}[hidden]{display:none!important}footer{padding:10px 14px;color:#66758a;font-size:11px;border-top:1px solid #e2e9f3;background:#fff}.status{margin-top:7px;font-size:12px;color:#446189}
     .field input[type=checkbox]{display:inline-block;margin:0 4px 0 0;vertical-align:middle}input:disabled,select:disabled{background:#f0f3f8;color:#8390a2}
+    .warning{color:#925500}.environment-warning{margin-top:8px;padding:8px;background:#fff6df;border-radius:7px;font-size:12px}.environment-warning button{font-size:12px;padding:3px 7px;margin-top:5px}.environment-stats{margin:8px 0}.environment-stats dt{font-size:12px;color:#66758a;margin-top:8px}.environment-stats dd{margin:2px 0;font-size:13px;overflow-wrap:anywhere}.guide-steps{padding-left:22px;font-size:13px}.guide-steps li{margin:8px 0}.guide-link{color:#2563eb}.guide-check{font-size:13px;font-weight:400}.tabs button{white-space:nowrap;padding-left:6px;padding-right:6px}
   </style><div id="outline" hidden></div><div id="notice" hidden></div><div id="bar" hidden></div><section id="panel" hidden></section><button id="launcher" title="打开网页保活与采集助手">定时助手</button>`;
   document.documentElement.appendChild(host);
   const $ = selector => root.querySelector(selector);
@@ -197,6 +203,61 @@
     if (session.run) return '执行中：' + session.run.task.name + ' · ' + ({ entry: '打开起始页', arrival: '等待页面', steps: '步骤 ' + (session.run.index + 1), return: '等待返回', returning: '正在返回' }[session.run.phase] || '准备中');
     if (!db().enabled) return '本站自动任务已暂停';
     return GM_getValue(OWNER_KEY, '') === tabId ? '本站自动任务运行中' : '任务在本站另一标签页运行';
+  }
+  function environmentValues() {
+    return {
+      visibility: document.hidden ? '后台：可能是切换标签、最小化或锁屏，无法区分' : '页面可见',
+      network: navigator.onLine === false ? '浏览器报告离线' : '浏览器报告在线，未验证网站连接',
+      interval: environment.maxGapMs ? (environment.maxGapMs / 1000).toFixed(1) + ' 秒（预期约 0.5 秒）' : '等待首次观测',
+      delays: environment.delayCount ? environment.delayCount + ' 次，最近一次：' + fmt(environment.lastDelayAt) : '尚未观测到 ≥5 秒的调度间隔，不代表设置正确',
+      lifecycle: environment.freezeCount + ' 次冻结事件；' + (environment.lastResumeAt ? '最近恢复：' + fmt(environment.lastResumeAt) : '尚未收到恢复事件；没有事件不代表不会冻结'),
+      discarded: environment.wasDiscarded ? '浏览器报告本页此前被丢弃，现已重新加载' : typeof document.wasDiscarded === 'boolean' ? '本次加载未报告此前被丢弃' : '当前浏览器未提供此状态',
+      started: fmt(environment.startedAt)
+    };
+  }
+  function updateEnvironmentUI() {
+    const warning = $('#environment-warning');
+    const warningText = navigator.onLine === false ? '浏览器报告离线，任务可能无法读取最新数据。' : environment.wasDiscarded ? '本页曾被浏览器丢弃，运行已中断过。' : environment.delayCount ? '本页观测到调度延迟，定时操作可能晚于计划。' : '';
+    if (warning) { warning.hidden = !warningText; $('#environment-warning-text').textContent = warningText; }
+    if (currentView !== 'environment') return;
+    for (const [key, value] of Object.entries(environmentValues())) {
+      const field = $(`[data-environment="${key}"]`); if (field) field.textContent = value;
+    }
+  }
+  function observeEnvironment() {
+    const now = Date.now();
+    const gap = now - environment.lastBeatAt;
+    environment.lastBeatAt = now;
+    if (Number.isFinite(gap) && gap >= 0) {
+      environment.maxGapMs = Math.max(environment.maxGapMs, gap);
+      if (gap >= 5000) {
+        environment.delayCount++; environment.lastDelayAt = now;
+        if (db().enabled && (!environment.lastWarningAt || now - environment.lastWarningAt >= 300000)) {
+          environment.lastWarningAt = now;
+          log('运行环境：两次调度检查间隔 ' + (gap / 1000).toFixed(1) + ' 秒。可能是后台限速、页面冻结、电脑休眠、页面繁忙或系统时钟变化；请查看「运行环境」指引。', 'warning');
+        }
+      }
+    }
+    updateEnvironmentUI();
+  }
+  function environmentHTML(state) {
+    const acknowledged = state.environmentAcknowledged || {};
+    const values = environmentValues();
+    const stats = [['visibility','页面状态'],['network','网络提示'],['interval','最长调度间隔'],['delays','明显延迟记录'],['lifecycle','冻结 / 恢复记录'],['discarded','页面丢弃记录'],['started','本次观察开始时间']];
+    return `<article class="card"><h3>运行状态观察</h3><p class="help">可观察页面前后台、调度间隔和浏览器提供的冻结记录。不能单独识别锁屏，也不能读取或修改浏览器休眠白名单、节能开关和 Windows 电源设置。</p><dl class="environment-stats">${stats.map(([key,label]) => `<dt>${label}</dt><dd data-environment="${key}">${esc(values[key])}</dd>`).join('')}</dl><p class="help">调度间隔变长只说明执行延迟，无法判断是哪项设置导致。暂停期间脚本无法发出提示，恢复后才能记录。上述观察仅覆盖本次页面加载；刷新或跳转后重新观察。</p><button data-action="reset-environment">重新开始观察</button></article>
+      <article class="card"><h3>1. 将本站加入 Edge 活动网站列表</h3><p class="help">此设置无法自动检测或代为修改。请复制设置地址到浏览器地址栏；网页不能直接打开内部设置页。</p><label class="field">Edge 设置地址<input id="guide-edge" readonly value="edge://settings/system"></label><button data-action="copy-guide" data-guide="guide-edge">复制 Edge 设置地址</button><ol class="guide-steps"><li>打开「设置 → 系统和性能 → 性能」。</li><li>找到「始终保持这些网站处于活动状态」（旧版可能叫「从不将这些站点置于睡眠状态」），点击添加。</li><li>添加下方的本站地址，使本站排除标签休眠和节能限制。</li></ol><label class="field">本站地址<input id="guide-site" readonly value="${esc(ORIGIN)}"></label><button data-action="copy-guide" data-guide="guide-site">复制本站地址</button><p class="help"><a class="guide-link" href="https://support.microsoft.com/en-us/edge/learn-about-performance-features-in-microsoft-edge" target="_blank" rel="noopener noreferrer">微软 Edge 设置说明</a> · 其他浏览器请查找对应的「内存节省 / 节能」网站例外。</p><label class="field guide-check"><input type="checkbox" data-environment-check="edge" ${acknowledged.edge ? 'checked' : ''}>我已手动将本站加入活动网站列表</label><div class="muted">${acknowledged.edge ? '用户确认：' + esc(fmt(acknowledged.edge)) + '（非自动验证）' : '尚未由用户确认；脚本无法验证此设置'}</div></article>
+      <article class="card"><h3>2. 设置电脑保持运行</h3><ol class="guide-steps"><li>Windows 11：打开「设置 → 系统 → 电源和电池 / 电源 → 屏幕、睡眠和休眠超时」。Windows 10：打开「设置 → 系统 → 电源和睡眠」。</li><li>将运行任务期间使用的供电模式下「使设备进入睡眠状态」设为「从不」；如提供自动休眠选项，也需检查。</li><li>保持浏览器和目标标签页打开，保持网络连接。锁屏后也要确保电脑没有进入睡眠；笔记本合盖可能会进入睡眠。</li></ol><p class="help"><a class="guide-link" href="https://support.microsoft.com/en-us/windows/experience/power-battery/power-settings-in-windows-11" target="_blank" rel="noopener noreferrer">微软 Windows 电源设置说明</a></p><label class="field guide-check"><input type="checkbox" data-environment-check="system" ${acknowledged.system ? 'checked' : ''}>我已手动检查自动睡眠和休眠设置</label><div class="muted">${acknowledged.system ? '用户确认：' + esc(fmt(acknowledged.system)) + '（非自动验证）' : '尚未由用户确认；脚本无法验证此设置'}</div><p class="help">勾选只记录你的确认，不能证明电脑会一直保持运行。更改设置后可取消勾选。</p></article>
+      <article class="card"><h3>3. 做一次后台实测</h3><p class="help">完成设置后，点击上方「重新开始观察」，将浏览器最小化或锁屏至少 10 分钟，再回到本页检查最长调度间隔和延迟记录。观察不会额外点击网页；已启用的任务仍照常运行。测试期间避免刷新或页面跳转，否则观察重新开始。</p><p class="help">一次测试未出现延迟，也不能保证以后准时执行。浏览器和系统仍可能限制后台运行；恢复后的补执行无法挽回已经过期的登录状态。</p></article>`;
+  }
+  async function copyGuide(button) {
+    const field = ['guide-edge', 'guide-site'].includes(button.dataset.guide) && $('#' + button.dataset.guide);
+    if (!field) return;
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(field.value); notice('已复制，请粘贴到浏览器地址栏');
+    } catch {
+      field.focus(); field.select(); notice('自动复制不可用，已选中地址，请按 Ctrl+C 复制');
+    }
   }
   function renderBar() {
     const bar = $('#bar');
@@ -211,7 +272,8 @@
     $('#launcher').hidden = !!session.open && !picking && !session.recording;
     if (panel.hidden) return;
     const state = db();
-    panel.innerHTML = `<header><div class="row between"><span class="brand">网页定时助手 <small class="muted">v${Core.VERSION}</small></span><button data-action="close" aria-label="收起">收起</button></div><div class="muted">${esc(ORIGIN)}</div><div class="status" id="status">${esc(statusText())}</div><nav class="tabs">${[['tasks','任务'],['data','采集历史'],['logs','日志']].map(([id, label]) => `<button data-action="view" data-view="${id}" class="${currentView === id ? 'active' : ''}">${label}</button>`).join('')}</nav></header><main>${currentView === 'editor' ? editorHTML() : currentView === 'data' ? dataHTML(state) : currentView === 'logs' ? logsHTML(state) : tasksHTML(state)}</main><footer>仅在打开的网页中运行 · 计划使用电脑本地时间 · 采集历史最多保留 ${MAX_SAMPLES} 条</footer>`;
+    panel.innerHTML = `<header><div class="row between"><span class="brand">网页定时助手 <small class="muted">v${Core.VERSION}</small></span><button data-action="close" aria-label="收起">收起</button></div><div class="muted">${esc(ORIGIN)}</div><div class="status" id="status">${esc(statusText())}</div><nav class="tabs">${[['tasks','任务'],['data','采集历史'],['logs','日志'],['environment','运行环境']].map(([id, label]) => `<button data-action="view" data-view="${id}" class="${currentView === id ? 'active' : ''}">${label}</button>`).join('')}</nav><div id="environment-warning" class="environment-warning" hidden><div id="environment-warning-text"></div><button data-action="view" data-view="environment">查看设置指引</button></div></header><main>${currentView === 'editor' ? editorHTML() : currentView === 'data' ? dataHTML(state) : currentView === 'logs' ? logsHTML(state) : currentView === 'environment' ? environmentHTML(state) : tasksHTML(state)}</main><footer>仅在打开的网页中运行 · 计划使用电脑本地时间 · 采集历史最多保留 ${MAX_SAMPLES} 条</footer>`;
+    updateEnvironmentUI();
   }
   function openAssistant() {
     if (!host.isConnected) document.documentElement.appendChild(host);
@@ -226,7 +288,7 @@
     const list = state.samples.slice(-100).reverse();
     return `<div class="row between"><span class="muted">共 ${state.samples.length} 条，显示最近 100 条</span><button data-action="export-csv">导出全部 CSV</button></div>${list.length ? '<table><thead><tr><th>采集值 / 任务</th><th>值</th><th>时间</th></tr></thead><tbody>' + list.map(s => `<tr><td>${esc(s.name)}<div class="muted">${esc(s.taskName)}</div></td><td class="value">${esc(s.value)}<details><summary class="muted">原始内容</summary>${esc(s.raw)}</details></td><td>${esc(fmt(s.time))}</td></tr>`).join('') + '</tbody></table>' : '<div class="empty">采集结果会显示在这里</div>'}`;
   }
-  function logsHTML(state) { return `<div class="muted">最近 200 条运行日志</div>${state.logs.length ? state.logs.map(l => `<div class="log ${l.level === 'error' ? 'error' : ''}"><div class="muted">${esc(fmt(l.time))}</div>${esc(l.message)}</div>`).join('') : '<div class="empty">暂无日志</div>'}`; }
+  function logsHTML(state) { return `<div class="muted">最近 200 条运行日志</div>${state.logs.length ? state.logs.map(l => `<div class="log ${l.level === 'error' ? 'error' : l.level === 'warning' ? 'warning' : ''}"><div class="muted">${esc(fmt(l.time))}</div>${esc(l.message)}</div>`).join('') : '<div class="empty">暂无日志</div>'}`; }
   function selected(value, option) { return value === option ? 'selected' : ''; }
   function editorHTML() {
     const d = session.draft;
@@ -698,6 +760,10 @@
     switch (name) {
       case 'close': session.open = false; persist(); render(); break;
       case 'view': currentView = button.dataset.view; render(); break;
+      case 'copy-guide': await copyGuide(button); break;
+      case 'reset-environment':
+        Object.assign(environment, { startedAt: Date.now(), lastBeatAt: Date.now(), maxGapMs: 0, delayCount: 0, lastDelayAt: 0, freezeCount: 0, lastResumeAt: 0 });
+        render(); notice('已重新开始观察，请在后台运行一段时间后返回查看'); break;
       case 'new-keep': newDraft('keep'); break;
       case 'new-collect': newDraft('collect'); break;
       case 'toggle-site': {
@@ -705,6 +771,7 @@
         if (enabled && !session.recording) await claimOwner(true);
         updateDB(state => { state.enabled = enabled; });
         if (!enabled && session.run) finishRun('手动暂停');
+        if (enabled && !(db().environmentAcknowledged?.edge && db().environmentAcknowledged?.system)) notice('已启用本站。请到「运行环境」查看并确认后台设置');
         render(); break;
       }
       case 'cancel-run': finishRun('手动停止'); break;
@@ -788,6 +855,12 @@
   }
   root.addEventListener('input', updateDraftInput);
   root.addEventListener('change', updateDraftInput);
+  root.addEventListener('change', event => {
+    const input = event.target;
+    const key = input.dataset.environmentCheck;
+    if (!['edge', 'system'].includes(key)) return;
+    updateDB(state => { state.environmentAcknowledged = state.environmentAcknowledged || {}; if (input.checked) state.environmentAcknowledged[key] = Date.now(); else delete state.environmentAcknowledged[key]; });
+  });
   window.addEventListener('pagehide', () => { pageLeaving = true; });
   window.addEventListener('pageshow', () => {
     pageLeaving = false;
@@ -795,11 +868,16 @@
     if (session.draft) currentView = 'editor'; render();
     GM_getTab(tab => { tab.webKeeperOrigin = ORIGIN; GM_saveTab(tab); });
   });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+  document.addEventListener('visibilitychange', () => { observeEnvironment(); if (!document.hidden) tick(); });
+  document.addEventListener('freeze', () => { environment.freezeCount++; updateEnvironmentUI(); });
+  document.addEventListener('resume', () => { environment.lastResumeAt = Date.now(); observeEnvironment(); tick(); });
+  window.addEventListener('online', updateEnvironmentUI);
+  window.addEventListener('offline', updateEnvironmentUI);
   GM_addValueChangeListener(DB_KEY, () => refreshSoon());
   GM_addValueChangeListener(OWNER_KEY, () => { const status = $('#status'); if (status) status.textContent = statusText(); });
   window.addEventListener('web-keeper:open', openAssistant);
   GM_registerMenuCommand('打开网页定时助手', openAssistant);
+  GM_registerMenuCommand('运行环境与设置指引', () => { openAssistant(); currentView = 'environment'; render(); });
   GM_registerMenuCommand('暂停本站自动任务', () => { updateDB(state => { state.enabled = false; }); if (session.run) finishRun('手动暂停'); notice('本站任务已暂停'); render(); });
   GM_getTab(tab => {
     if (!tab.webKeeperId) tab.webKeeperId = uid();
@@ -810,6 +888,7 @@
     if (session.recording && session.recordingTabId !== tabId) session.recording = false;
     if (session.draft) currentView = 'editor';
     try { persist(); } catch (error) { notice(error.message); }
-    render(); setInterval(tick, 500); tick();
+    if (environment.wasDiscarded) log('运行环境：浏览器报告本页此前被丢弃，现已重新加载。请检查后台运行设置。', 'warning');
+    render(); setInterval(() => { observeEnvironment(); tick(); }, 500); tick();
   });
 })();

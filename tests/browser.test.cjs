@@ -10,7 +10,11 @@ const output = path.join(__dirname, '../test-results');
 fs.mkdirSync(output, { recursive: true });
 
 async function main() {
-  const server = http.createServer((request, response) => { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(html); });
+  const server = http.createServer((request, response) => {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (request.url === '/test-slow-response') { setTimeout(() => response.end('done'), 6200); return; }
+    response.end(html);
+  });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + server.address().port;
   let browser;
@@ -27,6 +31,7 @@ async function main() {
       await page.addInitScript(({ id, source, options }) => {
         if (options.noUUID) Object.defineProperty(crypto, 'randomUUID', {value:undefined, configurable:true});
         if (options.blockedSession) Object.defineProperty(window, 'sessionStorage', {get(){throw new DOMException('blocked','SecurityError');},configurable:true});
+        if (options.wasDiscarded) Object.defineProperty(document, 'wasDiscarded', {value:true,configurable:true});
         const prefix = '__tm__:';
         const listeners = new Map();
         window.GM_getValue = (key, fallback) => { const raw = localStorage.getItem(prefix + key); return raw === null ? fallback : JSON.parse(raw); };
@@ -63,6 +68,70 @@ async function main() {
     assert.ok((await blocked.locator('#notice').textContent()).includes('会话存储'));
     await blocked.close();
     console.log('PASS HTTP ID 兼容、页面样式隔离、菜单恢复和存储受限时打开入口');
+
+    // 指引只能记录用户确认；模拟生命周期通知并实际暂停页面执行，验证调度延迟。
+    const environmentPage = await newPage('environment');
+    const environmentKey = 'web-keeper:v1:' + origin;
+    await environmentPage.evaluate(() => window.__tmMenus['运行环境与设置指引']());
+    assert.ok(await environmentPage.locator('#panel').isVisible());
+    assert.ok((await environmentPage.locator('#panel main').textContent()).includes('不能读取或修改'));
+    assert.ok((await environmentPage.locator('[data-environment="delays"]').textContent()).includes('不代表设置正确'));
+    assert.equal(await environmentPage.locator('#guide-site').inputValue(),origin);
+    await environmentPage.evaluate(() => Object.defineProperty(navigator,'clipboard',{value:{writeText:async value=>{window.__guideCopied=value;}},configurable:true}));
+    await environmentPage.getByRole('button',{name:'复制本站地址',exact:true}).click();
+    assert.equal(await environmentPage.evaluate(()=>window.__guideCopied),origin);
+    await environmentPage.evaluate(() => {navigator.clipboard.writeText=async()=>{throw new DOMException('Denied','NotAllowedError');};});
+    await environmentPage.getByRole('button',{name:'复制 Edge 设置地址',exact:true}).click();
+    await environmentPage.waitForFunction(()=>document.querySelector('#web-keeper-root').shadowRoot.querySelector('#notice').textContent.includes('Ctrl+C'));
+    await environmentPage.waitForTimeout(700);
+    assert.ok(await environmentPage.locator('#guide-edge').evaluate(field=>field.selectionStart===0&&field.selectionEnd===field.value.length),'复制被拒绝后地址应保持选中');
+    await environmentPage.locator('[data-environment-check="edge"]').check();
+    await environmentPage.waitForFunction(key=>!!GM_getValue(key).environmentAcknowledged?.edge,environmentKey);
+    await environmentPage.locator('[data-environment-check="system"]').check();
+    await environmentPage.waitForFunction(key=>!!GM_getValue(key).environmentAcknowledged?.system,environmentKey);
+    await environmentPage.reload();
+    await environmentPage.evaluate(() => window.__tmMenus['运行环境与设置指引']());
+    assert.ok(await environmentPage.locator('[data-environment-check="edge"]').isChecked());
+    assert.ok(await environmentPage.locator('[data-environment-check="system"]').isChecked());
+    assert.ok((await environmentPage.locator('#panel main').textContent()).includes('非自动验证'));
+    await environmentPage.locator('[data-environment-check="edge"]').uncheck();
+    await environmentPage.waitForFunction(key=>!GM_getValue(key).environmentAcknowledged.edge,environmentKey);
+    await environmentPage.evaluate(()=>{Object.defineProperty(document,'hidden',{value:true,configurable:true});document.dispatchEvent(new Event('visibilitychange'));});
+    assert.ok((await environmentPage.locator('[data-environment="visibility"]').textContent()).includes('后台'));
+    assert.ok((await environmentPage.locator('[data-environment="visibility"]').textContent()).includes('无法区分'));
+    await environmentPage.evaluate(()=>{Object.defineProperty(document,'hidden',{value:false,configurable:true});document.dispatchEvent(new Event('visibilitychange'));});
+    assert.equal(await environmentPage.locator('[data-environment="visibility"]').textContent(),'页面可见');
+    await environmentPage.evaluate(()=>{Object.defineProperty(navigator,'onLine',{value:false,configurable:true});window.dispatchEvent(new Event('offline'));});
+    assert.ok((await environmentPage.locator('[data-environment="network"]').textContent()).includes('离线'));
+    assert.ok(await environmentPage.locator('#environment-warning').isVisible());
+    await environmentPage.evaluate(()=>{Object.defineProperty(navigator,'onLine',{value:true,configurable:true});window.dispatchEvent(new Event('online'));});
+    assert.ok((await environmentPage.locator('[data-environment="network"]').textContent()).includes('未验证网站连接'));
+    await environmentPage.evaluate(key=>{const state=GM_getValue(key);state.enabled=true;GM_setValue(key,state);},environmentKey);
+    await environmentPage.getByRole('button',{name:'重新开始观察',exact:true}).click();
+    await environmentPage.evaluate(()=>{
+      document.dispatchEvent(new Event('freeze'));
+      const request=new XMLHttpRequest();request.open('GET','/test-slow-response',false);request.send();
+      document.dispatchEvent(new Event('resume'));
+    });
+    await environmentPage.waitForFunction(()=>{const root=document.querySelector('#web-keeper-root').shadowRoot;return parseFloat(root.querySelector('[data-environment="interval"]').textContent)>=5&&root.querySelector('[data-environment="lifecycle"]').textContent.includes('最近恢复');},null,{timeout:5000,polling:100});
+    assert.ok((await environmentPage.locator('[data-environment="delays"]').textContent()).includes('次，最近一次'));
+    assert.ok((await environmentPage.locator('[data-environment="lifecycle"]').textContent()).startsWith('1 次冻结'));
+    await environmentPage.waitForFunction(key=>GM_getValue(key).logs.some(l=>l.level==='warning'&&l.message.includes('两次调度检查间隔')&&l.message.includes('系统时钟变化')),environmentKey);
+    assert.equal(await environmentPage.evaluate(key=>GM_getValue(key).tasks.length,environmentKey),0);
+    await environmentPage.screenshot({path:path.join(output,'environment-guide.png')});
+    await environmentPage.getByRole('button',{name:'重新开始观察',exact:true}).click();
+    assert.ok((await environmentPage.locator('[data-environment="delays"]').textContent()).includes('尚未观测到'));
+    await environmentPage.evaluate(key=>{const state=GM_getValue(key);state.enabled=false;GM_setValue(key,state);},environmentKey);
+    await environmentPage.close();
+    const discarded = await newPage('discarded',{wasDiscarded:true});
+    await discarded.evaluate(() => window.__tmMenus['运行环境与设置指引']());
+    assert.ok((await discarded.locator('[data-environment="discarded"]').textContent()).includes('此前被丢弃'));
+    assert.ok(await discarded.locator('#environment-warning').isVisible());
+    await discarded.evaluate(key=>GM_setValue(key,{version:1,enabled:false,tasks:[],samples:[],logs:[]}),environmentKey);
+    await discarded.close();
+    assert.deepEqual(errors, [], '运行环境检查不能产生未处理异常');
+    console.log('PASS 设置指引、手动确认持久化、复制失败回退、离线提示、生命周期事件及实际暂停后的延迟记录');
+    if (process.env.BROWSER_TEST_SCOPE === 'environment') { console.log('ENVIRONMENT BROWSER TESTS PASSED'); return; }
 
     // 自定义下拉框在 mousedown 打开；下拉 DOM 中同时有隐藏的同名旧菜单。
     const custom = await newPage('custom-select');
@@ -128,7 +197,7 @@ async function main() {
       document.body.appendChild(section);
     });
     await diagnostic.locator('#launcher').click();
-    assert.ok((await diagnostic.locator('.brand').textContent()).includes('v1.0.3'));
+    assert.ok((await diagnostic.locator('.brand').textContent()).includes('v1.0.4'));
     await diagnostic.getByRole('button',{name:'＋ 保活任务',exact:true}).click();
     await diagnostic.getByRole('button',{name:'点选点击元素',exact:true}).click();
     await diagnostic.locator('#diagnostic-visible').click();

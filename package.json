@@ -1,7 +1,7 @@
 {
   "name": "web-keeper-userscript",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "license": "MIT",
   "description": "网页保活与定时采集油猴脚本",
   "repository": {
